@@ -1,0 +1,18 @@
+[project]
+name = "pipellm"
+version = "0.1.0"
+requires-python = ">=3.10"
+dependencies = ["pyyaml"]
+
+[project.scripts]
+pipellm = "pipellm.cli:main"
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["pipellm"]
+
+[tool.setuptools.package-data]
+pipellm = ["index.html"]

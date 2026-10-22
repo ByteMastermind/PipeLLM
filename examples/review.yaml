@@ -1,0 +1,32 @@
+model: sonnet
+vars:
+  topic: null
+jobs:
+  - name: draft
+    prompt: |
+      Write a short article about {{ vars.topic }}. Return only the article in Markdown.
+
+      Your previous draft (empty on the first try):
+      {{ jobs.draft }}
+
+      Reviewer notes on it:
+      {{ jobs.review.notes }}
+  - name: review
+    prompt: |
+      Review this article for accuracy and clarity.
+      Set revise to true if it needs another draft and list what to fix in notes.
+
+      {{ jobs.draft }}
+    schema:
+      type: object
+      properties:
+        revise:
+          type: boolean
+        notes:
+          type: string
+      required: [revise, notes]
+    back:
+      to: draft
+      when: jobs.review.revise
+      max: 2
+output: "{{ jobs.draft }}"

@@ -1,0 +1,201 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>pipellm</title>
+<style>
+  :root { color-scheme: light dark; font: 14px system-ui, sans-serif; }
+  body { max-width: 960px; margin: 0 auto; padding: 16px; }
+  input, textarea, select, button { font: inherit; }
+  textarea, pre { font-family: ui-monospace, monospace; font-size: 13px; }
+  textarea, input:not([type=number]) { width: 100%; box-sizing: border-box; }
+  textarea { resize: vertical; }
+  label { display: block; flex: 1 1 140px; }
+  label > span { display: block; font-size: 12px; opacity: .7; }
+  fieldset { border: 1px solid #8886; border-radius: 6px; margin: 12px 0; }
+  pre { white-space: pre-wrap; background: #8881; padding: 8px; border-radius: 6px; min-height: 1em; }
+  .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: end; margin: 6px 0; }
+  .bad { outline: 2px solid #d33; }
+  .err { color: #d33; }
+  #status { white-space: pre-wrap; }
+  #runvars textarea { height: 3em; }
+</style>
+</head>
+<body>
+<div class="row">
+  <select id="files"></select>
+  <button id="new">New</button>
+  <button id="save">Save</button>
+  <span id="status"></span>
+</div>
+<div id="editor"></div>
+<fieldset>
+  <legend>Run</legend>
+  <div id="runvars"></div>
+  <button id="run">Save and run</button>
+  <pre id="log"></pre>
+  <pre id="output"></pre>
+</fieldset>
+<datalist id="models"><option value="fable"><option value="opus"><option value="sonnet"><option value="haiku"></datalist>
+<datalist id="efforts"><option value="low"><option value="medium"><option value="high"><option value="xhigh"><option value="max"></datalist>
+<script>
+const token = location.hash.slice(1);
+const JOB = { name: "text", model: "text", effort: "text", foreach: "text", concurrency: "int", retries: "int", tools: "list", cwd: "text", prompt: "area", schema: "json", back: "object", stop: "object" };
+const KINDS = {
+  text: [v => v ?? "", s => s || undefined],
+  area: [v => v ?? "", s => s || undefined],
+  int: [v => v ?? "", s => s === "" ? undefined : Number(s)],
+  list: [v => (v ?? []).join(", "), s => s.split(",").map(t => t.trim()).filter(Boolean)],
+  json: [v => v === undefined ? "" : JSON.stringify(v, null, 2), s => s.trim() ? JSON.parse(s) : undefined],
+};
+const $ = id => document.getElementById(id);
+let file, pipe, vars, runValues = {};
+
+function h(tag, props, ...kids) {
+  const e = Object.assign(document.createElement(tag), props);
+  e.append(...kids);
+  return e;
+}
+
+function status(msg, bad) {
+  $("status").textContent = msg;
+  $("status").className = bad ? "err" : "";
+}
+
+async function guard(fn) {
+  try { await fn(); } catch (e) { status(e.message, true); }
+}
+
+async function api(method, path, body) {
+  const r = await fetch(path, { method, headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }, body: body && JSON.stringify(body) });
+  if (!r.ok) throw new Error(await r.text());
+  return r.json();
+}
+
+function field(obj, key, kind = "text", label = key, placeholder = "") {
+  const [show, parse] = KINDS[kind];
+  const multi = kind === "area" || kind === "json";
+  const input = h(multi ? "textarea" : "input", { rows: kind === "area" ? 6 : 3, value: show(obj[key]), placeholder });
+  if (kind === "int") input.type = "number";
+  if (key === "model") input.setAttribute("list", "models");
+  if (key === "effort") input.setAttribute("list", "efforts");
+  input.oninput = () => {
+    try {
+      obj[key] = parse(input.value);
+      input.classList.remove("bad");
+    } catch {
+      input.classList.add("bad");
+    }
+  };
+  return h("label", {}, h("span", {}, label), input);
+}
+
+function button(text, onclick) {
+  return h("button", { textContent: text, onclick });
+}
+
+function move(i, d) {
+  const j = i + d;
+  if (j < 0 || j >= pipe.jobs.length) return;
+  [pipe.jobs[i], pipe.jobs[j]] = [pipe.jobs[j], pipe.jobs[i]];
+  render();
+}
+
+function render() {
+  $("editor").replaceChildren(...(pipe ? [
+    h("fieldset", {}, h("legend", {}, "Pipeline"),
+      h("div", { className: "row" }, field(pipe, "model", "text", "default model"), field(pipe, "effort", "text", "default effort"), field(pipe, "output", "text", "output (default: last job)")),
+      ...vars.map((v, i) => h("div", { className: "row" },
+        field(v, "name", "text", "var"), field(v, "value", "text", "default (empty: required)"),
+        button("remove", () => { vars.splice(i, 1); render(); }))),
+      button("add var", () => { vars.push({}); render(); })),
+    ...pipe.jobs.map((job, i) => h("fieldset", {}, h("legend", {}, `job ${i + 1}`),
+      h("div", { className: "row" }, ...["name", "model", "effort", "foreach", "concurrency", "retries"].map(k => field(job, k, JOB[k]))),
+      h("div", { className: "row" }, field(job, "tools", "list", "tools (comma separated)"), field(job, "cwd")),
+      field(job, "prompt", "area", "prompt ({{ vars.x }}, {{ jobs.x }}, {{ item }})"),
+      field(job, "schema", "json", "output json schema (empty: text)"),
+      h("div", { className: "row" }, field(job.back ??= {}, "to", "text", "back to (this or earlier job)"),
+        field(job.back, "when", "text", "back when (empty: always)"), field(job.back, "max", "int", "back max")),
+      h("div", { className: "row" }, field(job.stop ??= {}, "when", "text", "stop when (empty: no hard stop)"),
+        field(job.stop, "reason", "text", "stop reason")),
+      h("div", { className: "row" }, button("up", () => move(i, -1)), button("down", () => move(i, 1)),
+        button("remove", () => { pipe.jobs.splice(i, 1); render(); })))),
+    button("add job", () => { pipe.jobs.push({ name: `job${pipe.jobs.length + 1}` }); render(); }),
+  ] : []));
+  $("runvars").replaceChildren(...(pipe ? vars.filter(v => v.name).map(v => field(runValues, v.name, "area", v.name, v.value ?? "required")) : []));
+}
+
+function parseVar(s) {
+  if (s === undefined) return null;
+  try { return /^\s*[[{]/.test(s) ? JSON.parse(s) : s; } catch { return s; }
+}
+
+function serialize() {
+  return {
+    model: pipe.model,
+    effort: pipe.effort,
+    vars: vars.length ? Object.fromEntries(vars.filter(v => v.name).map(v => [v.name, parseVar(v.value)])) : undefined,
+    output: pipe.output,
+    jobs: pipe.jobs.map(job => Object.fromEntries(Object.keys(JOB).map(k => [k, k !== "schema" && ["[]", "{}"].includes(JSON.stringify(job[k])) ? undefined : job[k]]))),
+  };
+}
+
+async function save() {
+  if (document.querySelector(".bad")) throw new Error("invalid json");
+  const errors = await api("PUT", `/api/pipelines/${file}`, serialize());
+  status(errors.length ? errors.join("\n") : "saved", errors.length);
+  render();
+  return !errors.length;
+}
+
+async function open(name) {
+  file = name;
+  pipe = null;
+  render();
+  const p = await api("GET", `/api/pipelines/${name}`);
+  if (!p || typeof p !== "object" || Array.isArray(p)) throw new Error("not a pipeline");
+  pipe = { ...p, jobs: Array.isArray(p.jobs) ? p.jobs : [] };
+  vars = Object.entries(p.vars ?? {}).map(([name, v]) => ({ name, value: v === null ? undefined : typeof v === "string" ? v : JSON.stringify(v) }));
+  status("");
+  render();
+}
+
+async function poll(id) {
+  const run = await api("GET", `/api/runs/${id}`);
+  $("log").textContent = run.log.join("\n");
+  $("output").textContent = run.output ?? "";
+  if (run.status === "running") setTimeout(() => guard(() => poll(id)), 1000);
+  else status(run.status, run.status === "failed");
+}
+
+$("files").onchange = () => guard(() => open($("files").value));
+$("save").onclick = () => guard(save);
+$("new").onclick = () => {
+  let name = prompt("file name");
+  if (!name) return;
+  if (!/\.ya?ml$/.test(name)) name += ".yaml";
+  $("files").append(h("option", { value: name, textContent: name }));
+  $("files").value = file = name;
+  pipe = { jobs: [{ name: "job1" }] };
+  vars = [];
+  status("not saved");
+  render();
+};
+$("run").onclick = () => guard(async () => {
+  if (!await save()) return;
+  const given = Object.fromEntries(vars.filter(v => runValues[v.name]).map(v => [v.name, runValues[v.name]]));
+  $("log").textContent = $("output").textContent = "";
+  const { id } = await api("POST", "/api/runs", { file, vars: given });
+  status("running");
+  await poll(id);
+});
+
+guard(async () => {
+  const files = await api("GET", "/api/pipelines");
+  $("files").replaceChildren(...files.map(f => h("option", { value: f, textContent: f })));
+  if (files.length) await open(files[0]);
+});
+</script>
+</body>
+</html>

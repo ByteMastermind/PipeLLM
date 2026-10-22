@@ -1,0 +1,29 @@
+model: sonnet
+vars:
+  topic: null
+  audience: developers
+jobs:
+  - name: outline
+    prompt: |
+      Plan a short article about {{ vars.topic }} for {{ vars.audience }}.
+      Return 3 to 5 section titles.
+    schema:
+      type: array
+      items:
+        type: string
+  - name: sections
+    model: haiku
+    foreach: jobs.outline
+    concurrency: 3
+    retries: 1
+    prompt: |
+      Write one section of an article about {{ vars.topic }} for {{ vars.audience }}.
+      Full outline: {{ jobs.outline }}
+      Section to write: {{ item }}
+      Return only the section in Markdown, starting with a ## heading.
+  - name: article
+    prompt: |
+      Join these sections into one coherent Markdown article with a title and a short intro.
+      Return only the article.
+
+      {{ jobs.sections }}
