@@ -15,6 +15,7 @@ pipellm check article.yaml
 pipellm start article.yaml --var topic="sqlite WAL mode" > article.md
 pipellm start article.yaml --vars-file topics.yaml
 pipellm start notes.yaml --var doc=@notes.txt
+pipellm start article.yaml --var topic="sqlite WAL mode" --sequential
 pipellm serve
 ```
 
@@ -23,6 +24,8 @@ pipellm serve
 Agents run with `--permission-mode bypassPermissions`, so they use their `tools` without asking and `Bash` can run any command.
 
 `--vars-file` is a YAML list of variable sets; the pipeline runs once per set.
+
+`--sequential` runs `foreach` items one at a time, in order, ignoring `concurrency`, so many agents don't hit the model or MCP servers at once.
 
 `serve` opens a web editor for the pipelines in the current directory. It prints a URL with an access token; anyone with the URL can run agents on this machine, so keep the default `--host 127.0.0.1` unless you trust the network.
 

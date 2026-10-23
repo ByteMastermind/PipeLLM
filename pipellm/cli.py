@@ -22,6 +22,9 @@ def start(args):
     pipe = core.load(args.file)
     if errors := core.check(pipe):
         raise core.PipelineError("\n".join(f"{args.file}: {e}" for e in errors))
+    if args.sequential:
+        for job in pipe["jobs"]:
+            job["concurrency"] = 1
     given = dict(parse_var(v) for v in args.var)
     rows = core.load(args.vars_file) if args.vars_file else [{}]
     if not isinstance(rows, list) or not all(isinstance(r, dict) for r in rows):
@@ -53,6 +56,7 @@ def main():
     p.add_argument("file")
     p.add_argument("--var", action="append", default=[], metavar="KEY=VALUE", help="set a variable, @path reads a file")
     p.add_argument("--vars-file", help="yaml list of variable sets, runs the pipeline once per set")
+    p.add_argument("--sequential", action="store_true", help="run foreach items one at a time")
     p = sub.add_parser("check", help="validate pipelines")
     p.add_argument("files", nargs="+")
     p = sub.add_parser("serve", help="web gui for pipelines in the current directory")
