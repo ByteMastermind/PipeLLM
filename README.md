@@ -84,3 +84,30 @@ Inside a `back` loop, prompts can also reference the job itself and later jobs o
       when: jobs.login.blocked          # stops when truthy
       reason: "{{ jobs.login.reason }}" # default: the when path
 ```
+
+`next` jumps forward to a later job, skipping the jobs in between. Its entries are tried in order, the first whose `when` reference is truthy (default always) wins; if none does, the run continues with the following job. Skipped jobs render empty, so a job after the branches can reference all of them (see `examples/triage.yaml`):
+
+```yaml
+  - name: triage
+    prompt: "Classify this issue: {{ vars.issue }}"
+    schema:
+      type: object
+      properties: {bug: {type: boolean}, feature: {type: boolean}}
+      required: [bug, feature]
+    next:
+      - to: diagnose              # if
+        when: jobs.triage.bug
+      - to: design                # else if
+        when: jobs.triage.feature
+      - to: answer                # else
+  - name: diagnose
+    prompt: "Diagnose this bug: {{ vars.issue }}"
+    next: [{to: reply}]           # skip the other branches
+  - name: design
+    prompt: "Design this feature: {{ vars.issue }}"
+    next: [{to: reply}]
+  - name: answer
+    prompt: "Answer this question: {{ vars.issue }}"
+  - name: reply
+    prompt: "Reply to the author: {{ jobs.diagnose }}{{ jobs.design }}{{ jobs.answer }}"
+```

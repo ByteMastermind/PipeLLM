@@ -1,0 +1,53 @@
+model: sonnet
+vars:
+  issue: null
+jobs:
+  - name: triage
+    prompt: |
+      Classify this issue report.
+      Set bug if it describes broken behavior, feature if it asks for something new.
+
+      {{ vars.issue }}
+    schema:
+      type: object
+      properties:
+        bug:
+          type: boolean
+        feature:
+          type: boolean
+      required: [bug, feature]
+    next:
+      - to: diagnose
+        when: jobs.triage.bug
+      - to: design
+        when: jobs.triage.feature
+      - to: answer
+  - name: diagnose
+    prompt: |
+      List the likely causes of this bug and what is needed to reproduce it.
+
+      {{ vars.issue }}
+    next:
+      - to: reply
+  - name: design
+    prompt: |
+      Outline how this feature could work and what it would affect.
+
+      {{ vars.issue }}
+    next:
+      - to: reply
+  - name: answer
+    prompt: |
+      Answer this question.
+
+      {{ vars.issue }}
+  - name: reply
+    prompt: |
+      Write a short reply to the author of this issue based on the notes.
+      Return only the reply.
+
+      Issue:
+      {{ vars.issue }}
+
+      Notes:
+      {{ jobs.diagnose }}{{ jobs.design }}{{ jobs.answer }}

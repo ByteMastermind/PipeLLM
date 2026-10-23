@@ -26,9 +26,11 @@ JOB_TYPES = {
     "cwd": str,
     "back": dict,
     "stop": dict,
+    "next": list,
 }
 BACK_TYPES = {"to": str, "when": str, "max": int}
 STOP_TYPES = {"when": str, "reason": str}
+NEXT_TYPES = {"to": str, "when": str}
 
 
 class PipelineError(Exception):
@@ -125,6 +127,17 @@ def check(pipe):
                 errors += [f"{where}: unknown stop when {r}" for r in unknown_refs([stop["when"]], vars, names[:i + 1], False)]
             if isinstance(stop.get("reason"), str):
                 errors += [f"{where}: unknown stop reason {r}" for r in unknown_refs(TEMPLATE.findall(stop["reason"]), vars, names[:i + 1], False)]
+        steps = job.get("next")
+        if isinstance(steps, list):
+            for n, step in enumerate(steps):
+                if not isinstance(step, dict):
+                    errors.append(f"{where}: next[{n}] must be a mapping")
+                    continue
+                errors += type_errors(step, NEXT_TYPES, f"{where}: next[{n}]")
+                if step.get("to") not in names[i + 1:]:
+                    errors.append(f"{where}: next[{n}] to must be a later job")
+                if isinstance(step.get("when"), str):
+                    errors += [f"{where}: unknown next[{n}] when {r}" for r in unknown_refs([step["when"]], vars, names[:i + 1], False)]
     if isinstance(pipe.get("output"), str):
         refs = TEMPLATE.findall(pipe["output"])
         errors += [f"pipeline: unknown reference {r}" for r in unknown_refs(refs, vars, names, False)]
@@ -165,8 +178,12 @@ def ran(ctx, path):
     return head != "jobs" or rest.partition(".")[0] in ctx["jobs"]
 
 
+def holds(ctx, when):
+    return when is None or ran(ctx, when) and resolve(ctx, when)
+
+
 def render(template, ctx):
-    # jobs not run yet in back loops render empty
+    # jobs not run yet or skipped render empty
     return TEMPLATE.sub(lambda m: text(resolve(ctx, m[1])) if ran(ctx, m[1]) else "", template)
 
 
@@ -287,14 +304,19 @@ def run(pipe, vars, outdir, log):
         write(outdir / "jobs" / (name if passes[name] == 1 else f"{name}.{passes[name]}"), out)
         total += cost
         stop = job.get("stop")
-        if stop and resolve(ctx, stop["when"]):
+        if stop and holds(ctx, stop["when"]):
             reason = render(stop.get("reason", ""), ctx) or stop["when"]
             raise PipelineError(f"{name}: stop: {reason}")
         back = job.get("back")
-        if back and backs[name] < back["max"] and ("when" not in back or resolve(ctx, back["when"])):
+        if back and backs[name] < back["max"] and holds(ctx, back.get("when")):
             backs[name] += 1
             log(f"{name}: back to {back['to']} {backs[name]}/{back['max']}")
             i = names.index(back["to"])
+        elif to := next((s["to"] for s in job.get("next", []) if holds(ctx, s.get("when"))), None):
+            log(f"{name}: next {to}")
+            for skipped in names[i + 1:names.index(to)]:
+                ctx["jobs"].pop(skipped, None)
+            i = names.index(to)
         else:
             i += 1
     output = render(pipe["output"], ctx) if "output" in pipe else text(out)

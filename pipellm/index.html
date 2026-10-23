@@ -41,7 +41,7 @@
 <datalist id="efforts"><option value="low"><option value="medium"><option value="high"><option value="xhigh"><option value="max"></datalist>
 <script>
 const token = location.hash.slice(1);
-const JOB = { name: "text", model: "text", effort: "text", foreach: "text", concurrency: "int", retries: "int", tools: "list", cwd: "text", prompt: "area", schema: "json", back: "object", stop: "object" };
+const JOB = { name: "text", model: "text", effort: "text", foreach: "text", concurrency: "int", retries: "int", tools: "list", cwd: "text", prompt: "area", schema: "json", back: "object", stop: "object", next: "objects" };
 const KINDS = {
   text: [v => v ?? "", s => s || undefined],
   area: [v => v ?? "", s => s || undefined],
@@ -119,7 +119,10 @@ function render() {
         field(job.back, "when", "text", "back when (empty: always)"), field(job.back, "max", "int", "back max")),
       h("div", { className: "row" }, field(job.stop ??= {}, "when", "text", "stop when (empty: no hard stop)"),
         field(job.stop, "reason", "text", "stop reason")),
-      h("div", { className: "row" }, button("up", () => move(i, -1)), button("down", () => move(i, 1)),
+      ...(job.next ??= []).map((step, n) => h("div", { className: "row" },
+        field(step, "to", "text", "next to (later job)"), field(step, "when", "text", "next when (empty: always)"),
+        button("remove", () => { job.next.splice(n, 1); render(); }))),
+      h("div", { className: "row" }, button("add next", () => { job.next.push({}); render(); }), button("up", () => move(i, -1)), button("down", () => move(i, 1)),
         button("remove", () => { pipe.jobs.splice(i, 1); render(); })))),
     button("add job", () => { pipe.jobs.push({ name: `job${pipe.jobs.length + 1}` }); render(); }),
   ] : []));
