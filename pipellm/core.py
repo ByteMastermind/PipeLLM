@@ -1,5 +1,8 @@
+import contextlib
 import json
+import os
 import re
+import signal
 import subprocess
 import threading
 import time
@@ -41,6 +44,28 @@ class PipelineError(Exception):
     def __init__(self, message, cost=0):
         super().__init__(message)
         self.cost = cost
+
+
+class Stopped(Exception):
+    # not a PipelineError, so it skips retries and foreach failure counting
+    pass
+
+
+# running agents and foreach jobs, for stop() to end
+agents, aborts, spawn = set(), set(), threading.Lock()
+stopping = threading.Event()
+
+
+def stop():
+    # ends every run in this process: agents are killed, retries wake up, and the jobs
+    # that have not finished raise Stopped without being saved
+    with spawn:
+        stopping.set()
+    for abort in list(aborts):
+        abort.set()
+    for proc in list(agents):
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(proc.pid, signal.SIGTERM)
 
 
 def load(path):
@@ -214,9 +239,15 @@ def claude(prompt, model, effort, schema, tools, cwd, log):
     wrap = schema is not None and schema.get("type") != "object"
     if schema is not None:
         cmd += ["--json-schema", json.dumps({"type": "object", "properties": {"value": schema}, "required": ["value"]} if wrap else schema)]
-    result, other = None, []
+    result, other, proc = None, [], None
     try:
-        with subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, cwd=cwd or None) as proc:
+        with spawn:
+            if stopping.is_set():
+                raise Stopped
+            # in its own session, so ctrl+c reaches only pipellm and stop() kills the agent with its tools
+            proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, cwd=cwd or None, start_new_session=True)
+            agents.add(proc)
+        with proc:
             proc.stdin.write(prompt)
             proc.stdin.close()
             for line in proc.stdout:
@@ -232,6 +263,10 @@ def claude(prompt, model, effort, schema, tools, cwd, log):
             stderr = proc.stderr.read()
     except OSError as e:
         raise PipelineError(e)
+    finally:
+        agents.discard(proc)
+    if stopping.is_set():
+        raise Stopped
     if result is None:
         raise PipelineError(stderr.strip() or "".join(other).strip() or f"claude exited with {proc.returncode}")
     cost = result.get("total_cost_usd", 0)
@@ -260,7 +295,7 @@ def attempt(pipe, job, ctx, label, log, abort):
                 break
             except PipelineError as e:
                 spent += e.cost
-                # back off before retrying, give up early once the job is aborted
+                # back off before retrying, give up early once the job is aborted or the run stopped
                 if n == retries or abort.wait(BACKOFF * 2 ** n):
                     raise
                 log(f"{label}: retry {n + 1}/{retries}: {short(str(e))}")
@@ -275,7 +310,7 @@ def run_job(pipe, job, ctx, log):
     name = job["name"]
     if "foreach" not in job:
         log(f"{name}: running")
-        return attempt(pipe, job, ctx, name, log, threading.Event())
+        return attempt(pipe, job, ctx, name, log, stopping)
     items = resolve(ctx, job["foreach"])
     if not isinstance(items, list):
         raise PipelineError(f"{name}: foreach {job['foreach']} is not a list")
@@ -284,6 +319,7 @@ def run_job(pipe, job, ctx, log):
     # failed items output null, the job fails once more than max_failures items fail
     limit = job.get("max_failures", len(items) - 1)
     abort, lock, failures = threading.Event(), threading.Lock(), []
+    aborts.add(abort)
 
     def one(i, item):
         # counted on the worker, so it never starts another item once the job has failed
@@ -311,6 +347,7 @@ def run_job(pipe, job, ctx, log):
             if abort.is_set():
                 raise PipelineError(f"{name}: {len(failures)}/{len(items)} items failed, last {failures[-1]}")
     finally:
+        aborts.discard(abort)
         abort.set()
         ex.shutdown(wait=False, cancel_futures=True)
     failed = f", {len(failures)}/{len(items)} items failed" if failures else ""
@@ -322,54 +359,48 @@ def write(path, value):
     Path(f"{path}.{'txt' if isinstance(value, str) else 'json'}").write_text(text(value))
 
 
+def find(path):
+    # the file write() saved for path, None if there is none
+    return next((p for p in (Path(f"{path}.txt"), Path(f"{path}.json")) if p.exists()), None)
+
+
+def read(file):
+    return file.read_text() if file.suffix == ".txt" else json.loads(file.read_text())
+
+
 def rundir(file):
     return Path("runs") / f"{Path(file).stem}-{time.strftime('%Y%m%d-%H%M%S')}"
 
 
-def load_jobs(outdir, names):
-    # the latest saved pass of each job that finished, to resume a run from its folder
-    jobsdir = Path(outdir) / "jobs"
-    loaded = {}
-    for name in names:
-        best = (0, None)
-        for p in jobsdir.glob(f"{name}.*"):
-            mid, suffix = p.name[len(name) + 1:-len(p.suffix)], p.suffix
-            if suffix in (".json", ".txt") and (mid == "" or mid.isdigit()):
-                best = max(best, (int(mid or 1), p))
-        if best[1]:
-            loaded[name] = json.loads(best[1].read_text()) if best[1].suffix == ".json" else best[1].read_text()
-    return loaded
-
-
-def resume_at(names, loaded, start):
-    if start is not None:
-        if start not in names:
-            raise PipelineError(f"no job named {start}")
-        # keep outputs before the chosen job, re-run it and everything after
-        return names.index(start), {n: loaded[n] for n in names[:names.index(start)] if n in loaded}
-    i = next((k for k, n in enumerate(names) if n not in loaded), len(names))
-    return i, {n: loaded[n] for n in names[:i]}
-
-
-def run(pipe, vars, outdir, log, resume=None):
+def run(pipe, vars, outdir, log, saved=None, rerun=None):
+    # with saved, a run folder, jobs reuse its outputs for as long as this run retraces it, so back
+    # loops and next branches take the same path; from the first job without one (or rerun) on, all jobs run
     start, total = time.time(), 0
-    i, done = resume or (0, {})
-    ctx = {"vars": vars, "jobs": dict(done)}
+    ctx = {"vars": vars, "jobs": {}}
     jobs = pipe["jobs"]
     names = [job["name"] for job in jobs]
-    out = ctx["jobs"].get(names[-1])
-    passes, backs = Counter(done.keys()), Counter()
+    passes, backs = Counter(), Counter()
     (outdir / "jobs").mkdir(parents=True, exist_ok=True)
     write(outdir / "vars", vars)
-    if resume:
-        where = names[i] if i < len(jobs) else "nothing (all jobs finished)"
-        log(f"resume at {where}, reusing {', '.join(done) or 'nothing'}")
+    i = 0
     while i < len(jobs):
         job, name = jobs[i], names[i]
-        out, cost = run_job(pipe, job, ctx, log)
-        ctx["jobs"][name] = out
         passes[name] += 1
-        write(outdir / "jobs" / (name if passes[name] == 1 else f"{name}.{passes[name]}"), out)
+        file = name if passes[name] == 1 else f"{name}.{passes[name]}"
+        if saved and name != rerun and (found := find(saved / "jobs" / file)):
+            out, cost = read(found), 0
+            log(f"{name}: reused | {short(out)}")
+        else:
+            saved = None
+            try:
+                out, cost = run_job(pipe, job, ctx, log)
+            except (PipelineError, Stopped):
+                # whatever a job raises once the run is stopping, it was stopped
+                if stopping.is_set():
+                    raise Stopped(outdir) from None
+                raise
+        ctx["jobs"][name] = out
+        write(outdir / "jobs" / file, out)
         total += cost
         stop = job.get("stop")
         if stop and holds(ctx, stop["when"]):

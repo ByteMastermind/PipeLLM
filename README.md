@@ -28,7 +28,9 @@ Agents run with `--permission-mode bypassPermissions`, so they use their `tools`
 
 `--sequential` runs `foreach` items one at a time, in order, ignoring `concurrency`, so many agents don't hit the model or MCP servers at once.
 
-`--resume <rundir>` continues a saved run instead of starting over: it loads the finished jobs from that folder, reuses their saved outputs, and starts at the first job with no output (so a run that died in job 5 re-runs from job 5, not job 1). Variables come from the run's `vars.json`, and new outputs are written back into the same folder. `--from <job>` instead re-runs from a named job, keeping only the outputs before it. Resume picks the first job that has no saved output, so for a pipeline that skipped jobs with `next`, name the restart point with `--from`.
+Press ctrl+c to stop a running pipeline. The first press only asks; the second kills the running agents and ends the run. Jobs that finished stay saved in the run folder, while jobs still running lose their progress, including the finished items of a `foreach` job. pipellm then prints the `--resume` command to continue. A hangup or `kill` stops the run at once, the same way.
+
+`--resume <rundir>` continues a stopped or failed run instead of starting over. It retraces the run, reusing the saved output of every job it reaches, and runs agents again from the first job that has no saved output, so a run that died in job 5 re-runs from job 5, not job 1. `back` loops and `next` branches take the same path as before, because they are decided by the reused outputs. Variables come from the run's `vars.json` (`--var` overrides them), and new outputs are written into the same folder. `--from <job>` runs again from that job (for example after editing its prompt), reusing only what came before it. It saves to a new run folder and leaves the original as it was.
 
 `serve` opens a web editor for the pipelines in the current directory. It prints a URL with an access token; anyone with the URL can run agents on this machine, so keep the default `--host 127.0.0.1` unless you trust the network.
 
