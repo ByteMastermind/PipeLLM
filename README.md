@@ -16,6 +16,7 @@ pipellm start article.yaml --var topic="sqlite WAL mode" > article.md
 pipellm start article.yaml --vars-file topics.yaml
 pipellm start notes.yaml --var doc=@notes.txt
 pipellm start article.yaml --var topic="sqlite WAL mode" --sequential
+pipellm start article.yaml --resume runs/article-20261027-173208
 pipellm serve
 ```
 
@@ -26,6 +27,10 @@ Agents run with `--permission-mode bypassPermissions`, so they use their `tools`
 `--vars-file` is a YAML list of variable sets; the pipeline runs once per set.
 
 `--sequential` runs `foreach` items one at a time, in order, ignoring `concurrency`, so many agents don't hit the model or MCP servers at once.
+
+Press ctrl+c to stop a running pipeline. The first press only asks; the second kills the running agents and ends the run. Jobs that finished stay saved in the run folder, and so do the finished items of a `foreach` job, each saved as soon as it is done; only the agents still running lose their progress. pipellm then prints the `--resume` command to continue. A hangup or `kill` stops the run at once, the same way.
+
+`--resume <rundir>` continues a stopped or failed run instead of starting over. It retraces the run, reusing the saved output of every job it reaches, and runs agents again from the first job that has no saved output, so a run that died in job 5 re-runs from job 5, not job 1. If that job is a `foreach` job, its finished items are reused too and only the rest run again. `back` loops and `next` branches take the same path as before, because they are decided by the reused outputs. Variables come from the run's `vars.json` (`--var` overrides them), and new outputs are written into the same folder. `--from <job>` runs again from that job (for example after editing its prompt), reusing only what came before it. It saves to a new run folder and leaves the original as it was.
 
 `serve` opens a web editor for the pipelines in the current directory. It prints a URL with an access token; anyone with the URL can run agents on this machine, so keep the default `--host 127.0.0.1` unless you trust the network.
 
@@ -48,7 +53,8 @@ jobs:
     effort: low            # per-job, overrides the default
     foreach: jobs.outline  # one parallel agent per item
     concurrency: 3         # default 4
-    retries: 1             # default 0
+    retries: 3             # default 2
+    max_failures: 1        # foreach items allowed to fail, default all but one
     prompt: Write the section {{ item }} for {{ vars.audience }}.
   - name: article
     tools: [Read, Bash]    # built-in tools, default none
@@ -70,6 +76,8 @@ output: "{{ jobs.article }}"           # default last job output
 ```
 
 Templates: `{{ vars.x }}`, `{{ jobs.name }}`, `{{ item }}` (inside `foreach` jobs), with nested access like `{{ jobs.outline.0 }}` or `{{ item.title }}`. Non-text values are inserted as JSON. `prompt`, `model` and `cwd` are templated, so `model: "{{ vars.model }}"` lets you choose the model per run.
+
+A failed agent (an error, or no valid output for the schema) is run again up to `retries` times, waiting 5s, 10s, 20s and so on in between. A `foreach` item that still fails outputs `null` and the other items carry on; the job fails, and the run with it, only once more than `max_failures` items have failed, so by default only when every item does. `max_failures: 0` stops at the first failed item. Any other job that fails after its retries ends the run. Costs of failed attempts are included in the totals.
 
 Inside a `back` loop, prompts can also reference the job itself and later jobs of the loop, like `{{ jobs.review.notes }}` in `article` above. They hold the output of the previous pass and are empty on the first one.
 
