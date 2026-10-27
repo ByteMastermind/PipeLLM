@@ -45,7 +45,7 @@ def stoppable(work):
         thread.join(0.2)
         if presses == 1 and not asked:
             asked = True
-            print("stop the run? jobs that have not finished lose their progress, finished jobs stay saved. press ctrl+c again to stop", file=sys.stderr, flush=True)
+            print("stop the run? running agents lose their progress, finished jobs and foreach items stay saved. press ctrl+c again to stop", file=sys.stderr, flush=True)
         elif presses > 1 and not core.stopping.is_set():
             print("stopping", file=sys.stderr, flush=True)
             core.stop()
@@ -127,7 +127,7 @@ def main():
         print(f"error: {e}", file=sys.stderr)
         sys.exit(1)
     except core.Stopped as e:
-        print(f"stopped, finished jobs are saved in {e}, continue with: pipellm start {args.file} --resume {e}", file=sys.stderr)
+        print(f"stopped, finished jobs and foreach items are saved in {e}, continue with: pipellm start {args.file} --resume {e}", file=sys.stderr)
         sys.exit(130)
     except KeyboardInterrupt:
         core.stop()

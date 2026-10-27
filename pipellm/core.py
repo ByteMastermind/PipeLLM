@@ -2,6 +2,7 @@ import contextlib
 import json
 import os
 import re
+import shutil
 import signal
 import subprocess
 import threading
@@ -306,7 +307,8 @@ def attempt(pipe, job, ctx, label, log, abort):
     return out, spent + cost
 
 
-def run_job(pipe, job, ctx, log):
+def run_job(pipe, job, ctx, log, folder, saved):
+    # foreach items are written to folder as they finish, and reused from saved, a folder of an earlier run
     name = job["name"]
     if "foreach" not in job:
         log(f"{name}: running")
@@ -316,6 +318,7 @@ def run_job(pipe, job, ctx, log):
         raise PipelineError(f"{name}: foreach {job['foreach']} is not a list")
     log(f"{name}: running {len(items)} items")
     start = time.time()
+    folder.mkdir(exist_ok=True)
     # failed items output null, the job fails once more than max_failures items fail
     limit = job.get("max_failures", len(items) - 1)
     abort, lock, failures = threading.Event(), threading.Lock(), []
@@ -325,14 +328,20 @@ def run_job(pipe, job, ctx, log):
         # counted on the worker, so it never starts another item once the job has failed
         if abort.is_set():
             raise PipelineError(f"{name}[{i}]: cancelled")
-        try:
-            return attempt(pipe, job, {**ctx, "item": item}, f"{name}[{i}]", log, abort)
-        except PipelineError as e:
-            with lock:
-                failures.append(e)
-                if len(failures) > limit:
-                    abort.set()
-            raise
+        if saved and (found := find(saved / str(i))):
+            out, cost = read(found), 0
+            log(f"{name}[{i}]: reused | {short(out)}")
+        else:
+            try:
+                out, cost = attempt(pipe, job, {**ctx, "item": item}, f"{name}[{i}]", log, abort)
+            except PipelineError as e:
+                with lock:
+                    failures.append(e)
+                    if len(failures) > limit:
+                        abort.set()
+                raise
+        write(folder / str(i), out)
+        return out, cost
 
     outs, cost = [None] * len(items), 0
     ex = ThreadPoolExecutor(job.get("concurrency", 4))
@@ -374,7 +383,8 @@ def rundir(file):
 
 def run(pipe, vars, outdir, log, saved=None, rerun=None):
     # with saved, a run folder, jobs reuse its outputs for as long as this run retraces it, so back
-    # loops and next branches take the same path; from the first job without one (or rerun) on, all jobs run
+    # loops and next branches take the same path; from the first job without one (or rerun) on, all jobs run,
+    # the first one reusing its finished foreach items
     start, total = time.time(), 0
     ctx = {"vars": vars, "jobs": {}}
     jobs = pipe["jobs"]
@@ -387,13 +397,14 @@ def run(pipe, vars, outdir, log, saved=None, rerun=None):
         job, name = jobs[i], names[i]
         passes[name] += 1
         file = name if passes[name] == 1 else f"{name}.{passes[name]}"
-        if saved and name != rerun and (found := find(saved / "jobs" / file)):
+        prior = saved / "jobs" / file if saved and name != rerun else None
+        if prior and (found := find(prior)):
             out, cost = read(found), 0
             log(f"{name}: reused | {short(out)}")
         else:
             saved = None
             try:
-                out, cost = run_job(pipe, job, ctx, log)
+                out, cost = run_job(pipe, job, ctx, log, outdir / "jobs" / file, prior)
             except (PipelineError, Stopped):
                 # whatever a job raises once the run is stopping, it was stopped
                 if stopping.is_set():
@@ -401,6 +412,8 @@ def run(pipe, vars, outdir, log, saved=None, rerun=None):
                 raise
         ctx["jobs"][name] = out
         write(outdir / "jobs" / file, out)
+        # foreach items, now saved with the job
+        shutil.rmtree(outdir / "jobs" / file, ignore_errors=True)
         total += cost
         stop = job.get("stop")
         if stop and holds(ctx, stop["when"]):
