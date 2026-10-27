@@ -326,15 +326,44 @@ def rundir(file):
     return Path("runs") / f"{Path(file).stem}-{time.strftime('%Y%m%d-%H%M%S')}"
 
 
-def run(pipe, vars, outdir, log):
+def load_jobs(outdir, names):
+    # the latest saved pass of each job that finished, to resume a run from its folder
+    jobsdir = Path(outdir) / "jobs"
+    loaded = {}
+    for name in names:
+        best = (0, None)
+        for p in jobsdir.glob(f"{name}.*"):
+            mid, suffix = p.name[len(name) + 1:-len(p.suffix)], p.suffix
+            if suffix in (".json", ".txt") and (mid == "" or mid.isdigit()):
+                best = max(best, (int(mid or 1), p))
+        if best[1]:
+            loaded[name] = json.loads(best[1].read_text()) if best[1].suffix == ".json" else best[1].read_text()
+    return loaded
+
+
+def resume_at(names, loaded, start):
+    if start is not None:
+        if start not in names:
+            raise PipelineError(f"no job named {start}")
+        # keep outputs before the chosen job, re-run it and everything after
+        return names.index(start), {n: loaded[n] for n in names[:names.index(start)] if n in loaded}
+    i = next((k for k, n in enumerate(names) if n not in loaded), len(names))
+    return i, {n: loaded[n] for n in names[:i]}
+
+
+def run(pipe, vars, outdir, log, resume=None):
     start, total = time.time(), 0
-    ctx = {"vars": vars, "jobs": {}}
+    i, done = resume or (0, {})
+    ctx = {"vars": vars, "jobs": dict(done)}
     jobs = pipe["jobs"]
     names = [job["name"] for job in jobs]
-    passes, backs = Counter(), Counter()
+    out = ctx["jobs"].get(names[-1])
+    passes, backs = Counter(done.keys()), Counter()
     (outdir / "jobs").mkdir(parents=True, exist_ok=True)
     write(outdir / "vars", vars)
-    i = 0
+    if resume:
+        where = names[i] if i < len(jobs) else "nothing (all jobs finished)"
+        log(f"resume at {where}, reusing {', '.join(done) or 'nothing'}")
     while i < len(jobs):
         job, name = jobs[i], names[i]
         out, cost = run_job(pipe, job, ctx, log)

@@ -16,6 +16,7 @@ pipellm start article.yaml --var topic="sqlite WAL mode" > article.md
 pipellm start article.yaml --vars-file topics.yaml
 pipellm start notes.yaml --var doc=@notes.txt
 pipellm start article.yaml --var topic="sqlite WAL mode" --sequential
+pipellm start article.yaml --resume runs/article-20261027-173208
 pipellm serve
 ```
 
@@ -26,6 +27,8 @@ Agents run with `--permission-mode bypassPermissions`, so they use their `tools`
 `--vars-file` is a YAML list of variable sets; the pipeline runs once per set.
 
 `--sequential` runs `foreach` items one at a time, in order, ignoring `concurrency`, so many agents don't hit the model or MCP servers at once.
+
+`--resume <rundir>` continues a saved run instead of starting over: it loads the finished jobs from that folder, reuses their saved outputs, and starts at the first job with no output (so a run that died in job 5 re-runs from job 5, not job 1). Variables come from the run's `vars.json`, and new outputs are written back into the same folder. `--from <job>` instead re-runs from a named job, keeping only the outputs before it. Resume picks the first job that has no saved output, so for a pipeline that skipped jobs with `next`, name the restart point with `--from`.
 
 `serve` opens a web editor for the pipelines in the current directory. It prints a URL with an access token; anyone with the URL can run agents on this machine, so keep the default `--host 127.0.0.1` unless you trust the network.
 
