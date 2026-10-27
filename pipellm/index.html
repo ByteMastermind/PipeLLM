@@ -41,7 +41,7 @@
 <datalist id="efforts"><option value="low"><option value="medium"><option value="high"><option value="xhigh"><option value="max"></datalist>
 <script>
 const token = location.hash.slice(1);
-const JOB = { name: "text", model: "text", effort: "text", foreach: "text", concurrency: "int", retries: "int", tools: "list", cwd: "text", prompt: "area", schema: "json", back: "object", stop: "object", next: "objects" };
+const JOB = { name: "text", model: "text", effort: "text", foreach: "text", concurrency: "int", retries: "int", max_failures: "int", tools: "list", cwd: "text", prompt: "area", schema: "json", back: "object", stop: "object", next: "objects" };
 const KINDS = {
   text: [v => v ?? "", s => s || undefined],
   area: [v => v ?? "", s => s || undefined],
@@ -111,7 +111,7 @@ function render() {
         button("remove", () => { vars.splice(i, 1); render(); }))),
       button("add var", () => { vars.push({}); render(); })),
     ...pipe.jobs.map((job, i) => h("fieldset", {}, h("legend", {}, `job ${i + 1}`),
-      h("div", { className: "row" }, ...["name", "model", "effort", "foreach", "concurrency", "retries"].map(k => field(job, k, JOB[k]))),
+      h("div", { className: "row" }, ...["name", "model", "effort", "foreach", "concurrency", "retries", "max_failures"].map(k => field(job, k, JOB[k]))),
       h("div", { className: "row" }, field(job, "tools", "list", "tools (comma separated)"), field(job, "cwd")),
       field(job, "prompt", "area", "prompt ({{ vars.x }}, {{ jobs.x }}, {{ item }})"),
       field(job, "schema", "json", "output json schema (empty: text)"),

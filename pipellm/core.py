@@ -1,6 +1,7 @@
 import json
 import re
 import subprocess
+import threading
 import time
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -12,6 +13,8 @@ TEMPLATE = re.compile(r"\{\{\s*([\w.-]+)\s*\}\}")
 NAME = re.compile(r"\w[\w-]*")
 EFFORTS = ("low", "medium", "high", "xhigh", "max")
 PREVIEW = 80
+RETRIES = 2
+BACKOFF = 5
 PIPELINE_TYPES = {"model": str, "effort": str, "vars": dict, "output": str, "jobs": list}
 JOB_TYPES = {
     "name": str,
@@ -22,6 +25,7 @@ JOB_TYPES = {
     "foreach": str,
     "concurrency": int,
     "retries": int,
+    "max_failures": int,
     "tools": list,
     "cwd": str,
     "back": dict,
@@ -34,7 +38,9 @@ NEXT_TYPES = {"to": str, "when": str}
 
 
 class PipelineError(Exception):
-    pass
+    def __init__(self, message, cost=0):
+        super().__init__(message)
+        self.cost = cost
 
 
 def load(path):
@@ -99,6 +105,10 @@ def check(pipe):
             errors.append(f"{where}: concurrency must be at least 1")
         if isinstance(job.get("retries"), int) and job["retries"] < 0:
             errors.append(f"{where}: retries must not be negative")
+        if isinstance(job.get("max_failures"), int) and job["max_failures"] < 0:
+            errors.append(f"{where}: max_failures must not be negative")
+        if "max_failures" in job and "foreach" not in job:
+            errors.append(f"{where}: max_failures requires foreach")
         if isinstance(job.get("effort"), str) and job["effort"] not in EFFORTS:
             errors.append(f"{where}: effort must be one of {', '.join(EFFORTS)}")
         if isinstance(job.get("tools"), list) and not all(isinstance(t, str) and t.isidentifier() for t in job["tools"]):
@@ -224,59 +234,88 @@ def claude(prompt, model, effort, schema, tools, cwd, log):
         raise PipelineError(e)
     if result is None:
         raise PipelineError(stderr.strip() or "".join(other).strip() or f"claude exited with {proc.returncode}")
+    cost = result.get("total_cost_usd", 0)
     if result.get("is_error"):
-        raise PipelineError(result.get("result") or result.get("subtype"))
+        raise PipelineError(result.get("result") or result.get("subtype"), cost)
     out = result["result"] if schema is None else result.get("structured_output")
     if out is None:
-        raise PipelineError("no structured output")
-    return out["value"] if wrap else out, result.get("total_cost_usd", 0)
+        raise PipelineError("no structured output", cost)
+    return out["value"] if wrap else out, cost
 
 
-def attempt(pipe, job, ctx, label, log):
-    args = (
-        render(job["prompt"], ctx),
-        render(job.get("model") or pipe.get("model") or "", ctx),
-        job.get("effort") or pipe.get("effort") or "",
-        job.get("schema"),
-        job.get("tools", []),
-        render(job.get("cwd", ""), ctx),
-    )
-    retries = job.get("retries", 0)
-    for n in range(retries + 1):
-        start = time.time()
-        try:
-            out, cost = claude(*args, lambda m: log(f"{label}: {m}"))
-        except PipelineError as e:
-            if n == retries:
-                log(f"{label}: failed")
-                raise PipelineError(f"{label}: {e}")
-            log(f"{label}: retry {n + 1}/{retries}: {short(str(e))}")
-            continue
-        log(f"{label}: done {time.time() - start:.1f}s ${cost:.4f} | {short(out)}")
-        return out, cost
+def attempt(pipe, job, ctx, label, log, abort):
+    retries, spent, start = job.get("retries", RETRIES), 0, time.time()
+    try:
+        args = (
+            render(job["prompt"], ctx),
+            render(job.get("model") or pipe.get("model") or "", ctx),
+            job.get("effort") or pipe.get("effort") or "",
+            job.get("schema"),
+            job.get("tools", []),
+            render(job.get("cwd", ""), ctx),
+        )
+        for n in range(retries + 1):
+            try:
+                out, cost = claude(*args, lambda m: log(f"{label}: {m}"))
+                break
+            except PipelineError as e:
+                spent += e.cost
+                # back off before retrying, give up early once the job is aborted
+                if n == retries or abort.wait(BACKOFF * 2 ** n):
+                    raise
+                log(f"{label}: retry {n + 1}/{retries}: {short(str(e))}")
+    except PipelineError as e:
+        log(f"{label}: failed: {short(str(e))}")
+        raise PipelineError(f"{label}: {e}", spent)
+    log(f"{label}: done {time.time() - start:.1f}s ${spent + cost:.4f} | {short(out)}")
+    return out, spent + cost
 
 
 def run_job(pipe, job, ctx, log):
     name = job["name"]
     if "foreach" not in job:
         log(f"{name}: running")
-        return attempt(pipe, job, ctx, name, log)
+        return attempt(pipe, job, ctx, name, log, threading.Event())
     items = resolve(ctx, job["foreach"])
     if not isinstance(items, list):
         raise PipelineError(f"{name}: foreach {job['foreach']} is not a list")
     log(f"{name}: running {len(items)} items")
     start = time.time()
+    # failed items output null, the job fails once more than max_failures items fail
+    limit = job.get("max_failures", len(items) - 1)
+    abort, lock, failures = threading.Event(), threading.Lock(), []
+
+    def one(i, item):
+        # counted on the worker, so it never starts another item once the job has failed
+        if abort.is_set():
+            raise PipelineError(f"{name}[{i}]: cancelled")
+        try:
+            return attempt(pipe, job, {**ctx, "item": item}, f"{name}[{i}]", log, abort)
+        except PipelineError as e:
+            with lock:
+                failures.append(e)
+                if len(failures) > limit:
+                    abort.set()
+            raise
+
+    outs, cost = [None] * len(items), 0
     ex = ThreadPoolExecutor(job.get("concurrency", 4))
-    futures = [ex.submit(attempt, pipe, job, {**ctx, "item": item}, f"{name}[{i}]", log) for i, item in enumerate(items)]
+    futures = {ex.submit(one, i, item): i for i, item in enumerate(items)}
     try:
         for future in as_completed(futures):
-            future.result()
+            try:
+                outs[futures[future]], spent = future.result()
+            except PipelineError as e:
+                spent = e.cost
+            cost += spent
+            if abort.is_set():
+                raise PipelineError(f"{name}: {len(failures)}/{len(items)} items failed, last {failures[-1]}")
     finally:
+        abort.set()
         ex.shutdown(wait=False, cancel_futures=True)
-    results = [f.result() for f in futures]
-    cost = sum(c for _, c in results)
-    log(f"{name}: done {time.time() - start:.1f}s ${cost:.4f}")
-    return [out for out, _ in results], cost
+    failed = f", {len(failures)}/{len(items)} items failed" if failures else ""
+    log(f"{name}: done {time.time() - start:.1f}s ${cost:.4f}{failed}")
+    return outs, cost
 
 
 def write(path, value):

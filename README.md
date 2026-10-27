@@ -48,7 +48,8 @@ jobs:
     effort: low            # per-job, overrides the default
     foreach: jobs.outline  # one parallel agent per item
     concurrency: 3         # default 4
-    retries: 1             # default 0
+    retries: 3             # default 2
+    max_failures: 1        # foreach items allowed to fail, default all but one
     prompt: Write the section {{ item }} for {{ vars.audience }}.
   - name: article
     tools: [Read, Bash]    # built-in tools, default none
@@ -70,6 +71,8 @@ output: "{{ jobs.article }}"           # default last job output
 ```
 
 Templates: `{{ vars.x }}`, `{{ jobs.name }}`, `{{ item }}` (inside `foreach` jobs), with nested access like `{{ jobs.outline.0 }}` or `{{ item.title }}`. Non-text values are inserted as JSON. `prompt`, `model` and `cwd` are templated, so `model: "{{ vars.model }}"` lets you choose the model per run.
+
+A failed agent (an error, or no valid output for the schema) is run again up to `retries` times, waiting 5s, 10s, 20s and so on in between. A `foreach` item that still fails outputs `null` and the other items carry on; the job fails, and the run with it, only once more than `max_failures` items have failed, so by default only when every item does. `max_failures: 0` stops at the first failed item. Any other job that fails after its retries ends the run. Costs of failed attempts are included in the totals.
 
 Inside a `back` loop, prompts can also reference the job itself and later jobs of the loop, like `{{ jobs.review.notes }}` in `article` above. They hold the output of the previous pass and are empty on the first one.
 
