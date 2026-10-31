@@ -28,10 +28,11 @@ def error_text(error):
 
 def run(prompt, model, effort, schema, tools, cwd, log):
     cmd = ["opencode", "run", "--format", "json", "--auto"]
-    if model:
-        cmd += ["--model", model]
-    if effort:
-        cmd += ["--variant", effort]
+    model_str = model or ""
+    if effort and "#" not in model_str:
+        model_str = f"{model_str}#{effort}" if model_str else ""
+    if model_str:
+        cmd += ["--model", model_str]
     if cwd:
         cmd += ["--dir", str(Path(cwd).resolve())]
     permission = {"*": "deny", **GUARDS, **{TOOLS[t]: "allow" for t in tools}}
