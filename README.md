@@ -1,6 +1,6 @@
 # pipellm
 
-Run pipelines of Claude Code agents defined in YAML.
+Run pipelines of CLI agents (Claude Code, opencode) defined in YAML.
 
 ## Install
 
@@ -22,7 +22,7 @@ pipellm serve
 
 `start` prints progress to stderr (job states, agent tool calls, a one-line preview of each output) and the final output to stdout. Every run is saved to `runs/<pipeline>-<timestamp>/` (`vars.json`, `jobs/<name>.txt|json`, `output.txt`); jobs run again by `back` are saved as `jobs/<name>.2.txt|json` and so on.
 
-Agents run with `--permission-mode bypassPermissions`, so they use their `tools` without asking and `Bash` can run any command.
+Agents run without permission prompts (claude `--permission-mode bypassPermissions`, opencode `--auto`), so they use their `tools` without asking and `Bash` can run any command.
 
 `--vars-file` is a YAML list of variable sets; the pipeline runs once per set.
 
@@ -37,6 +37,7 @@ Press ctrl+c to stop a running pipeline. The first press only asks; the second k
 ## Pipeline
 
 ```yaml
+runner: claude             # default runner for all jobs (claude|opencode), default claude
 model: sonnet              # default model for all jobs
 effort: high               # default effort for all jobs (low|medium|high|xhigh|max)
 vars:
@@ -49,8 +50,9 @@ jobs:
       type: array
       items: {type: string}
   - name: sections
-    model: haiku
-    effort: low            # per-job, overrides the default
+    runner: opencode       # per-job, overrides the default
+    model: openrouter/qwen/qwen3-coder
+    effort: high
     foreach: jobs.outline  # one parallel agent per item
     concurrency: 3         # default 4
     retries: 3             # default 2
@@ -75,7 +77,7 @@ jobs:
 output: "{{ jobs.article }}"           # default last job output
 ```
 
-Templates: `{{ vars.x }}`, `{{ jobs.name }}`, `{{ item }}` (inside `foreach` jobs), with nested access like `{{ jobs.outline.0 }}` or `{{ item.title }}`. Non-text values are inserted as JSON. `prompt`, `model` and `cwd` are templated, so `model: "{{ vars.model }}"` lets you choose the model per run.
+Templates: `{{ vars.x }}`, `{{ jobs.name }}`, `{{ item }}` (inside `foreach` jobs), with nested access like `{{ jobs.outline.0 }}` or `{{ item.title }}`. Non-text values are inserted as JSON. `prompt`, `runner`, `model` and `cwd` are templated, so `model: "{{ vars.model }}"` lets you choose the model per run.
 
 A failed agent (an error, or no valid output for the schema) is run again up to `retries` times, waiting 5s, 10s, 20s and so on in between. A `foreach` item that still fails outputs `null` and the other items carry on; the job fails, and the run with it, only once more than `max_failures` items have failed, so by default only when every item does. `max_failures: 0` stops at the first failed item. Any other job that fails after its retries ends the run. Costs of failed attempts are included in the totals.
 
@@ -122,3 +124,12 @@ Inside a `back` loop, prompts can also reference the job itself and later jobs o
   - name: reply
     prompt: "Reply to the author: {{ jobs.diagnose }}{{ jobs.design }}{{ jobs.answer }}"
 ```
+
+## Runners
+
+`runner` picks the CLI agent that runs a job, per pipeline or per job.
+
+- `claude` (default): `model` is a Claude Code model or alias like `sonnet`, `effort` is low|medium|high|xhigh|max.
+- `opencode`: `model` is `provider/model` like `openrouter/qwen/qwen3-coder`, `effort` is passed as `--variant` (provider-specific, like `high`, `max`, `minimal`). `tools` use the claude names above and become opencode permissions, everything else is denied: Read, Write, Edit, Glob, Grep, Bash, WebFetch, WebSearch, TodoWrite, Task, Skill. opencode has no schema flag, so the `schema` is appended to the prompt and the reply is parsed and validated against it; a reply that does not match is a failed attempt and is retried like any other.
+
+To add a runner, write a module in `pipellm/runners/` and register it in `RUNNERS` in `pipellm/runners/__init__.py`. The module defines `EFFORTS` (allowed efforts, `None` for any), `TOOLS` (supported tool names, `None` for any) and `run(prompt, model, effort, schema, tools, cwd, log)` returning `(output, cost)` and raising `RunnerError(message, cost)` on failure. `pipellm/runners/base.py` has `Events`, which starts the CLI so ctrl+c can stop it and yields its JSON events, and helpers for schema output by prompt.

@@ -37,11 +37,12 @@
   <pre id="log"></pre>
   <pre id="output"></pre>
 </fieldset>
+<datalist id="runners"><option value="claude"><option value="opencode"></datalist>
 <datalist id="models"><option value="fable"><option value="opus"><option value="sonnet"><option value="haiku"></datalist>
 <datalist id="efforts"><option value="low"><option value="medium"><option value="high"><option value="xhigh"><option value="max"></datalist>
 <script>
 const token = location.hash.slice(1);
-const JOB = { name: "text", model: "text", effort: "text", foreach: "text", concurrency: "int", retries: "int", max_failures: "int", tools: "list", cwd: "text", prompt: "area", schema: "json", back: "object", stop: "object", next: "objects" };
+const JOB = { name: "text", runner: "text", model: "text", effort: "text", foreach: "text", concurrency: "int", retries: "int", max_failures: "int", tools: "list", cwd: "text", prompt: "area", schema: "json", back: "object", stop: "object", next: "objects" };
 const KINDS = {
   text: [v => v ?? "", s => s || undefined],
   area: [v => v ?? "", s => s || undefined],
@@ -78,8 +79,7 @@ function field(obj, key, kind = "text", label = key, placeholder = "") {
   const multi = kind === "area" || kind === "json";
   const input = h(multi ? "textarea" : "input", { rows: kind === "area" ? 6 : 3, value: show(obj[key]), placeholder });
   if (kind === "int") input.type = "number";
-  if (key === "model") input.setAttribute("list", "models");
-  if (key === "effort") input.setAttribute("list", "efforts");
+  if (["runner", "model", "effort"].includes(key)) input.setAttribute("list", `${key}s`);
   input.oninput = () => {
     try {
       obj[key] = parse(input.value);
@@ -105,13 +105,13 @@ function move(i, d) {
 function render() {
   $("editor").replaceChildren(...(pipe ? [
     h("fieldset", {}, h("legend", {}, "Pipeline"),
-      h("div", { className: "row" }, field(pipe, "model", "text", "default model"), field(pipe, "effort", "text", "default effort"), field(pipe, "output", "text", "output (default: last job)")),
+      h("div", { className: "row" }, field(pipe, "runner", "text", "default runner"), field(pipe, "model", "text", "default model"), field(pipe, "effort", "text", "default effort"), field(pipe, "output", "text", "output (default: last job)")),
       ...vars.map((v, i) => h("div", { className: "row" },
         field(v, "name", "text", "var"), field(v, "value", "text", "default (empty: required)"),
         button("remove", () => { vars.splice(i, 1); render(); }))),
       button("add var", () => { vars.push({}); render(); })),
     ...pipe.jobs.map((job, i) => h("fieldset", {}, h("legend", {}, `job ${i + 1}`),
-      h("div", { className: "row" }, ...["name", "model", "effort", "foreach", "concurrency", "retries", "max_failures"].map(k => field(job, k, JOB[k]))),
+      h("div", { className: "row" }, ...["name", "runner", "model", "effort", "foreach", "concurrency", "retries", "max_failures"].map(k => field(job, k, JOB[k]))),
       h("div", { className: "row" }, field(job, "tools", "list", "tools (comma separated)"), field(job, "cwd")),
       field(job, "prompt", "area", "prompt ({{ vars.x }}, {{ jobs.x }}, {{ item }})"),
       field(job, "schema", "json", "output json schema (empty: text)"),
@@ -136,6 +136,7 @@ function parseVar(s) {
 
 function serialize() {
   return {
+    runner: pipe.runner,
     model: pipe.model,
     effort: pipe.effort,
     vars: vars.length ? Object.fromEntries(vars.filter(v => v.name).map(v => [v.name, parseVar(v.value)])) : undefined,

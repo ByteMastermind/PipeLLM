@@ -4,7 +4,6 @@ import os
 import re
 import shutil
 import signal
-import subprocess
 import threading
 import time
 from collections import Counter
@@ -13,15 +12,19 @@ from pathlib import Path
 
 import yaml
 
+from .runners import RUNNERS
+from .runners.base import RunnerError, Stopped, agents, spawn, stopping
+
 TEMPLATE = re.compile(r"\{\{\s*([\w.-]+)\s*\}\}")
 NAME = re.compile(r"\w[\w-]*")
-EFFORTS = ("low", "medium", "high", "xhigh", "max")
+RUNNER = "claude"
 PREVIEW = 80
 RETRIES = 2
 BACKOFF = 5
-PIPELINE_TYPES = {"model": str, "effort": str, "vars": dict, "output": str, "jobs": list}
+PIPELINE_TYPES = {"runner": str, "model": str, "effort": str, "vars": dict, "output": str, "jobs": list}
 JOB_TYPES = {
     "name": str,
+    "runner": str,
     "model": str,
     "effort": str,
     "prompt": str,
@@ -47,14 +50,8 @@ class PipelineError(Exception):
         self.cost = cost
 
 
-class Stopped(Exception):
-    # not a PipelineError, so it skips retries and foreach failure counting
-    pass
-
-
-# running agents and foreach jobs, for stop() to end
-agents, aborts, spawn = set(), set(), threading.Lock()
-stopping = threading.Event()
+# running foreach jobs, for stop() to end
+aborts = set()
 
 
 def stop():
@@ -102,13 +99,23 @@ def reach(jobs, names):
     return ends
 
 
+def runner_errors(name, effort, tools):
+    runner = RUNNERS.get(name)
+    if runner is None:
+        return [f"runner must be one of {', '.join(RUNNERS)}"]
+    errors = []
+    if effort and runner.EFFORTS and effort not in runner.EFFORTS:
+        errors.append(f"effort must be one of {', '.join(runner.EFFORTS)} for runner {name}")
+    if runner.TOOLS and (unknown := [t for t in tools if t not in runner.TOOLS]):
+        errors.append(f"runner {name} does not support tools {', '.join(unknown)}")
+    return errors
+
+
 def check(pipe):
     if not isinstance(pipe, dict):
         return ["pipeline must be a mapping"]
     errors = type_errors(pipe, PIPELINE_TYPES, "pipeline")
-    if isinstance(pipe.get("effort"), str) and pipe["effort"] not in EFFORTS:
-        errors.append(f"pipeline: effort must be one of {', '.join(EFFORTS)}")
-    vars = pipe["vars"] if isinstance(pipe.get("vars"), dict) else {}
+    vars =pipe["vars"] if isinstance(pipe.get("vars"), dict) else {}
     jobs = pipe["jobs"] if isinstance(pipe.get("jobs"), list) else []
     if not jobs:
         errors.append("pipeline: jobs must be a non-empty list")
@@ -135,11 +142,14 @@ def check(pipe):
             errors.append(f"{where}: max_failures must not be negative")
         if "max_failures" in job and "foreach" not in job:
             errors.append(f"{where}: max_failures requires foreach")
-        if isinstance(job.get("effort"), str) and job["effort"] not in EFFORTS:
-            errors.append(f"{where}: effort must be one of {', '.join(EFFORTS)}")
-        if isinstance(job.get("tools"), list) and not all(isinstance(t, str) and t.isidentifier() for t in job["tools"]):
+        tools = job["tools"] if isinstance(job.get("tools"), list) else []
+        if not all(isinstance(t, str) and t.isidentifier() for t in tools):
             errors.append(f"{where}: tools must be a list of tool names")
-        refs = [r for k in ("prompt", "model", "cwd") if isinstance(job.get(k), str) for r in TEMPLATE.findall(job[k])]
+            tools = []
+        runner = job.get("runner") or pipe.get("runner") or RUNNER
+        if isinstance(runner, str) and not TEMPLATE.search(runner):
+            errors += [f"{where}: {e}" for e in runner_errors(runner, job.get("effort") or pipe.get("effort"), tools)]
+        refs = [r for k in ("prompt", "runner", "model", "cwd") if isinstance(job.get(k), str) for r in TEMPLATE.findall(job[k])]
         errors += [f"{where}: unknown reference {r}" for r in unknown_refs(refs, vars, names[:ends[i]], "foreach" in job)]
         if isinstance(job.get("foreach"), str):
             errors += [f"{where}: unknown foreach {r}" for r in unknown_refs([job["foreach"]], vars, names[:i], False)]
@@ -223,84 +233,33 @@ def render(template, ctx):
     return TEMPLATE.sub(lambda m: text(resolve(ctx, m[1])) if ran(ctx, m[1]) else "", template)
 
 
-def tool_calls(event):
-    for block in event["message"]["content"] if event.get("type") == "assistant" else []:
-        if block["type"] == "tool_use" and block["name"] != "StructuredOutput":
-            args = [v for v in block["input"].values() if isinstance(v, str)]
-            yield short(f"{block['name']} {args[0] if args else ''}")
-
-
-def claude(prompt, model, effort, schema, tools, cwd, log):
-    cmd = ["claude", "-p", "--output-format", "stream-json", "--verbose", "--no-session-persistence", "--permission-mode", "bypassPermissions", "--tools", ",".join(tools)]
-    if model:
-        cmd += ["--model", model]
-    if effort:
-        cmd += ["--effort", effort]
-    # wrap non-object schema into {value: ...}
-    wrap = schema is not None and schema.get("type") != "object"
-    if schema is not None:
-        cmd += ["--json-schema", json.dumps({"type": "object", "properties": {"value": schema}, "required": ["value"]} if wrap else schema)]
-    result, other, proc = None, [], None
-    try:
-        with spawn:
-            if stopping.is_set():
-                raise Stopped
-            # in its own session, so ctrl+c reaches only pipellm and stop() kills the agent with its tools
-            proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, cwd=cwd or None, start_new_session=True)
-            agents.add(proc)
-        with proc:
-            proc.stdin.write(prompt)
-            proc.stdin.close()
-            for line in proc.stdout:
-                try:
-                    event = json.loads(line)
-                except json.JSONDecodeError:
-                    other.append(line)
-                    continue
-                if event.get("type") == "result":
-                    result = event
-                for call in tool_calls(event):
-                    log(call)
-            stderr = proc.stderr.read()
-    except OSError as e:
-        raise PipelineError(e)
-    finally:
-        agents.discard(proc)
-    if stopping.is_set():
-        raise Stopped
-    if result is None:
-        raise PipelineError(stderr.strip() or "".join(other).strip() or f"claude exited with {proc.returncode}")
-    cost = result.get("total_cost_usd", 0)
-    if result.get("is_error"):
-        raise PipelineError(result.get("result") or result.get("subtype"), cost)
-    out = result["result"] if schema is None else result.get("structured_output")
-    if out is None:
-        raise PipelineError("no structured output", cost)
-    return out["value"] if wrap else out, cost
-
-
 def attempt(pipe, job, ctx, label, log, abort):
     retries, spent, start = job.get("retries", RETRIES), 0, time.time()
     try:
+        runner = render(job.get("runner") or pipe.get("runner") or RUNNER, ctx)
+        effort = job.get("effort") or pipe.get("effort") or ""
+        tools = job.get("tools", [])
+        if errors := runner_errors(runner, effort, tools):
+            raise PipelineError("; ".join(errors))
         args = (
             render(job["prompt"], ctx),
             render(job.get("model") or pipe.get("model") or "", ctx),
-            job.get("effort") or pipe.get("effort") or "",
+            effort,
             job.get("schema"),
-            job.get("tools", []),
+            tools,
             render(job.get("cwd", ""), ctx),
         )
         for n in range(retries + 1):
             try:
-                out, cost = claude(*args, lambda m: log(f"{label}: {m}"))
+                out, cost = RUNNERS[runner].run(*args, lambda m: log(f"{label}: {short(m)}"))
                 break
-            except PipelineError as e:
+            except RunnerError as e:
                 spent += e.cost
                 # back off before retrying, give up early once the job is aborted or the run stopped
                 if n == retries or abort.wait(BACKOFF * 2 ** n):
                     raise
                 log(f"{label}: retry {n + 1}/{retries}: {short(str(e))}")
-    except PipelineError as e:
+    except (PipelineError, RunnerError) as e:
         log(f"{label}: failed: {short(str(e))}")
         raise PipelineError(f"{label}: {e}", spent)
     log(f"{label}: done {time.time() - start:.1f}s ${spent + cost:.4f} | {short(out)}")
