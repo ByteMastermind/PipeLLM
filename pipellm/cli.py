@@ -55,11 +55,9 @@ def stoppable(work):
 
 def start(args):
     pipe = core.load(args.file)
-    if errors := core.check(pipe):
+    if errors := core.check(pipe, args.file):
         raise core.PipelineError("\n".join(f"{args.file}: {e}" for e in errors))
-    if args.sequential:
-        for job in pipe["jobs"]:
-            job["concurrency"] = 1
+    core.sequential = args.sequential
     given = dict(parse_var(v) for v in args.var)
     saved = Path(args.resume) if args.resume else None
     if args.from_job and not saved:
@@ -83,8 +81,8 @@ def start(args):
             prefix = f"{i + 1}/{len(runs)} " if len(runs) > 1 else ""
             # --resume continues in the saved folder, --from leaves it as it is and saves to a new one
             outdir = saved if saved and not args.from_job else core.rundir(args.file)
-            output = core.run(pipe, vars, outdir, lambda m: print(prefix + m, file=sys.stderr, flush=True), saved, args.from_job)
-            print(output, flush=True)
+            output, _ = core.run(pipe, args.file, vars, outdir, lambda m: print(prefix + m, file=sys.stderr, flush=True), saved, args.from_job)
+            print(core.text(output), flush=True)
 
     stoppable(work)
 
@@ -93,7 +91,7 @@ def check(args):
     failed = False
     for file in args.files:
         try:
-            errors = core.check(core.load(file))
+            errors = core.check(core.load(file), file)
         except core.PipelineError as e:
             errors = [str(e)]
         for e in errors or ["ok"]:

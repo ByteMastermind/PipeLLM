@@ -27,7 +27,7 @@ Dumper.add_representer(str, lambda d, s: d.represent_scalar("tag:yaml.org,2002:s
 
 def start(file, vars):
     pipe = core.load(file)
-    if errors := core.check(pipe):
+    if errors := core.check(pipe, file):
         raise core.PipelineError("\n".join(errors))
     vars = core.merge_vars(pipe, vars)
     rid = uuid.uuid4().hex[:8]
@@ -35,7 +35,8 @@ def start(file, vars):
 
     def work():
         try:
-            run["output"] = core.run(pipe, vars, core.rundir(file), run["log"].append)
+            output, _ = core.run(pipe, file, vars, core.rundir(file), run["log"].append)
+            run["output"] = core.text(output)
             run["status"] = "done"
         except Exception as e:
             run["log"].append(f"error: {e}")
@@ -53,7 +54,7 @@ def route(method, path, body):
             return core.load(m[1])
         if method == "PUT":
             Path(m[1]).write_text(yaml.dump(body, Dumper=Dumper, sort_keys=False, allow_unicode=True))
-            return core.check(body)
+            return core.check(body, m[1])
     if method == "POST" and path == "/api/runs":
         return start(body["file"], body["vars"])
     if method == "GET" and (m := RUN.fullmatch(path)) and m[1] in runs:

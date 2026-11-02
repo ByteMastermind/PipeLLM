@@ -1,0 +1,20 @@
+model: sonnet
+vars:
+  subject: null
+jobs:
+  - name: topics
+    prompt: List three article topics about {{ vars.subject }}.
+    schema:
+      type: array
+      items:
+        type: string
+  - name: articles
+    pipeline: review.yaml
+    foreach: jobs.topics
+    vars:
+      topic: "{{ item }}"
+  - name: series
+    prompt: |
+      Join these articles into one series with a short intro.
+
+      {{ jobs.articles }}

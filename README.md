@@ -20,13 +20,13 @@ pipellm start article.yaml --resume runs/article-20261027-173208
 pipellm serve
 ```
 
-`start` prints progress to stderr (job states, agent tool calls, a one-line preview of each output) and the final output to stdout. Every run is saved to `runs/<pipeline>-<timestamp>/` (`vars.json`, `jobs/<name>.txt|json`, `output.txt`); jobs run again by `back` are saved as `jobs/<name>.2.txt|json` and so on.
+`start` prints progress to stderr (job states, agent tool calls, a one-line preview of each output) and the final output to stdout. Every run is saved to `runs/<pipeline>-<timestamp>/` (`vars.json`, `jobs/<name>.txt|json`, `output.txt|json`); jobs run again by `back` are saved as `jobs/<name>.2.txt|json` and so on.
 
 Agents run without permission prompts (claude `--permission-mode bypassPermissions`, opencode `--auto`), so they use their `tools` without asking and `Bash` can run any command.
 
 `--vars-file` is a YAML list of variable sets; the pipeline runs once per set.
 
-`--sequential` runs `foreach` items one at a time, in order, ignoring `concurrency`, so many agents don't hit the model or MCP servers at once.
+`--sequential` runs `foreach` items one at a time, in order, ignoring `concurrency`, also in child pipelines, so many agents don't hit the model or MCP servers at once.
 
 Press ctrl+c to stop a running pipeline. The first press only asks; the second kills the running agents and ends the run. Jobs that finished stay saved in the run folder, and so do the finished items of a `foreach` job, each saved as soon as it is done; only the agents still running lose their progress. pipellm then prints the `--resume` command to continue. A hangup or `kill` stops the run at once, the same way.
 
@@ -77,7 +77,7 @@ jobs:
 output: "{{ jobs.article }}"           # default last job output
 ```
 
-Templates: `{{ vars.x }}`, `{{ jobs.name }}`, `{{ item }}` (inside `foreach` jobs), with nested access like `{{ jobs.outline.0 }}` or `{{ item.title }}`. Non-text values are inserted as JSON. `prompt`, `runner`, `model` and `cwd` are templated, so `model: "{{ vars.model }}"` lets you choose the model per run.
+Templates: `{{ vars.x }}`, `{{ jobs.name }}`, `{{ item }}` (inside `foreach` jobs), with nested access like `{{ jobs.outline.0 }}` or `{{ item.title }}`. Non-text values are inserted as JSON, except in `output` and pipeline `vars`, where a template that is a single reference, like `"{{ item }}"`, keeps its value. `prompt`, `runner`, `model` and `cwd` are templated, so `model: "{{ vars.model }}"` lets you choose the model per run.
 
 A failed agent (an error, or no valid output for the schema) is run again up to `retries` times, waiting 5s, 10s, 20s and so on in between. A `foreach` item that still fails outputs `null` and the other items carry on; the job fails, and the run with it, only once more than `max_failures` items have failed, so by default only when every item does. `max_failures: 0` stops at the first failed item. Any other job that fails after its retries ends the run. Costs of failed attempts are included in the totals.
 
@@ -124,6 +124,23 @@ Inside a `back` loop, prompts can also reference the job itself and later jobs o
   - name: reply
     prompt: "Reply to the author: {{ jobs.diagnose }}{{ jobs.design }}{{ jobs.answer }}"
 ```
+
+## Pipelines in pipelines
+
+A job can run another pipeline instead of an agent, like a function: `vars` are its arguments and the job outputs the child's `output` (see `examples/series.yaml`). The path is relative to the parent file. Children can run pipelines of their own, but not themselves.
+
+```yaml
+  - name: articles
+    pipeline: review.yaml    # instead of prompt
+    foreach: jobs.topics
+    vars:                    # templates, a single reference keeps its value
+      topic: "{{ item }}"
+    on_stop: continue        # fail (default) or continue
+```
+
+A `stop` in the child fails the job by default, like a failed agent: a `foreach` item outputs `null` and counts toward `max_failures`, any other job ends the run. With `on_stop: continue` the job, or the `foreach` item, outputs the stop reason and the run carries on. Once a `foreach` job fails, its other running children are cancelled before their next job.
+
+`runner`, `model`, `effort`, `schema`, `tools`, `cwd` and `retries` belong to the child's jobs; pass them as `vars` if the child should take them from the parent. Each child run is saved in the job's folder, `jobs/<name>/` or `jobs/<name>/<item>/` for `foreach`, and `--resume` continues inside it from the first child job without output.
 
 ## Runners
 

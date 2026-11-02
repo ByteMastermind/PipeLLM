@@ -38,20 +38,27 @@ JOB_TYPES = {
     "back": dict,
     "stop": dict,
     "next": list,
+    "pipeline": str,
+    "vars": dict,
+    "on_stop": str,
 }
+AGENT_KEYS = ("runner", "model", "effort", "schema", "tools", "cwd", "retries")
 BACK_TYPES = {"to": str, "when": str, "max": int}
 STOP_TYPES = {"when": str, "reason": str}
 NEXT_TYPES = {"to": str, "when": str}
 
 
 class PipelineError(Exception):
-    def __init__(self, message, cost=0):
+    # stop: reason of a stop job
+    def __init__(self, message, cost=0, stop=None):
         super().__init__(message)
-        self.cost = cost
+        self.cost, self.stop = cost, stop
 
 
 # running foreach jobs, for stop() to end
 aborts = set()
+# foreach items one at a time
+sequential = False
 
 
 def stop():
@@ -111,9 +118,25 @@ def runner_errors(name, effort, tools):
     return errors
 
 
-def check(pipe):
+def child_errors(name, given, path, seen):
+    file = Path(path).parent / name
+    if file.resolve() in seen:
+        return [f"pipeline {name} includes itself"]
+    try:
+        child = load(file)
+    except PipelineError as e:
+        return [f"pipeline {name}: {e}"]
+    if errors := check(child, file, seen):
+        return [f"{name}: {e}" for e in errors]
+    defaults = child.get("vars") or {}
+    errors = [f"unknown var {k} of pipeline {name}" for k in given if k not in defaults]
+    return errors + [f"missing var {k} of pipeline {name}" for k, v in defaults.items() if v is None and k not in given]
+
+
+def check(pipe, path, seen=()):
     if not isinstance(pipe, dict):
         return ["pipeline must be a mapping"]
+    seen = (*seen, Path(path).resolve())
     errors = type_errors(pipe, PIPELINE_TYPES, "pipeline")
     vars =pipe["vars"] if isinstance(pipe.get("vars"), dict) else {}
     jobs = pipe["jobs"] if isinstance(pipe.get("jobs"), list) else []
@@ -132,8 +155,14 @@ def check(pipe):
             errors.append(f"{where}: name must match {NAME.pattern}")
         elif name in names[:i]:
             errors.append(f"{where}: duplicate name")
-        if "prompt" not in job:
-            errors.append(f"{where}: prompt is required")
+        if ("prompt" in job) == ("pipeline" in job):
+            errors.append(f"{where}: needs either prompt or pipeline")
+        if "pipeline" in job:
+            errors += [f"{where}: {k} does not apply to a pipeline job" for k in AGENT_KEYS if k in job]
+        else:
+            errors += [f"{where}: {k} requires pipeline" for k in ("vars", "on_stop") if k in job]
+        if job.get("on_stop") not in (None, "fail", "continue"):
+            errors.append(f"{where}: on_stop must be fail or continue")
         if isinstance(job.get("concurrency"), int) and job["concurrency"] < 1:
             errors.append(f"{where}: concurrency must be at least 1")
         if isinstance(job.get("retries"), int) and job["retries"] < 0:
@@ -149,8 +178,12 @@ def check(pipe):
         runner = job.get("runner") or pipe.get("runner") or RUNNER
         if isinstance(runner, str) and not TEMPLATE.search(runner):
             errors += [f"{where}: {e}" for e in runner_errors(runner, job.get("effort") or pipe.get("effort"), tools)]
-        refs = [r for k in ("prompt", "runner", "model", "cwd") if isinstance(job.get(k), str) for r in TEMPLATE.findall(job[k])]
+        given = job["vars"] if isinstance(job.get("vars"), dict) else {}
+        texts = [job.get(k) for k in ("prompt", "runner", "model", "cwd")] + list(given.values())
+        refs = [r for t in texts if isinstance(t, str) for r in TEMPLATE.findall(t)]
         errors += [f"{where}: unknown reference {r}" for r in unknown_refs(refs, vars, names[:ends[i]], "foreach" in job)]
+        if isinstance(job.get("pipeline"), str):
+            errors += [f"{where}: {e}" for e in child_errors(job["pipeline"], given, path, seen)]
         if isinstance(job.get("foreach"), str):
             errors += [f"{where}: unknown foreach {r}" for r in unknown_refs([job["foreach"]], vars, names[:i], False)]
         back = job.get("back")
@@ -233,6 +266,12 @@ def render(template, ctx):
     return TEMPLATE.sub(lambda m: text(resolve(ctx, m[1])) if ran(ctx, m[1]) else "", template)
 
 
+def value(template, ctx):
+    # a lone reference keeps its value
+    m = TEMPLATE.fullmatch(template)
+    return resolve(ctx, m[1]) if m and ran(ctx, m[1]) else render(template, ctx)
+
+
 def attempt(pipe, job, ctx, label, log, abort):
     retries, spent, start = job.get("retries", RETRIES), 0, time.time()
     try:
@@ -266,12 +305,29 @@ def attempt(pipe, job, ctx, label, log, abort):
     return out, spent + cost
 
 
-def run_job(pipe, job, ctx, log, folder, saved):
+def call(pipe, path, job, ctx, label, log, folder, saved, abort):
+    # an agent, or a child pipeline run in folder
+    if "prompt" in job:
+        return attempt(pipe, job, ctx, label, log, abort)
+    try:
+        file = Path(path).parent / job["pipeline"]
+        child = load(file)
+        vars = merge_vars(child, {k: value(v, ctx) if isinstance(v, str) else v for k, v in job.get("vars", {}).items()})
+        return run(child, file, vars, folder, lambda m: log(f"{label}: {m}"), saved, abort=abort)
+    except PipelineError as e:
+        if e.stop and job.get("on_stop") == "continue":
+            log(f"{label}: stopped | {short(e.stop)}")
+            return e.stop, e.cost
+        log(f"{label}: failed: {short(str(e))}")
+        raise PipelineError(f"{label}: {e}", e.cost) from None
+
+
+def run_job(pipe, path, job, ctx, log, folder, saved):
     # foreach items are written to folder as they finish, and reused from saved, a folder of an earlier run
     name = job["name"]
     if "foreach" not in job:
         log(f"{name}: running")
-        return attempt(pipe, job, ctx, name, log, stopping)
+        return call(pipe, path, job, ctx, name, log, folder, saved, stopping)
     items = resolve(ctx, job["foreach"])
     if not isinstance(items, list):
         raise PipelineError(f"{name}: foreach {job['foreach']} is not a list")
@@ -292,10 +348,12 @@ def run_job(pipe, job, ctx, log, folder, saved):
             log(f"{name}[{i}]: reused | {short(out)}")
         else:
             try:
-                out, cost = attempt(pipe, job, {**ctx, "item": item}, f"{name}[{i}]", log, abort)
+                out, cost = call(pipe, path, job, {**ctx, "item": item}, f"{name}[{i}]", log, folder / str(i), saved and saved / str(i), abort)
             except PipelineError as e:
+                # once aborted, child runs fail as cancelled
                 with lock:
-                    failures.append(e)
+                    if not abort.is_set():
+                        failures.append(e)
                     if len(failures) > limit:
                         abort.set()
                 raise
@@ -303,7 +361,7 @@ def run_job(pipe, job, ctx, log, folder, saved):
         return out, cost
 
     outs, cost = [None] * len(items), 0
-    ex = ThreadPoolExecutor(job.get("concurrency", 4))
+    ex = ThreadPoolExecutor(1 if sequential else job.get("concurrency", 4))
     futures = {ex.submit(one, i, item): i for i, item in enumerate(items)}
     try:
         for future in as_completed(futures):
@@ -340,10 +398,10 @@ def rundir(file):
     return Path("runs") / f"{Path(file).stem}-{time.strftime('%Y%m%d-%H%M%S')}"
 
 
-def run(pipe, vars, outdir, log, saved=None, rerun=None):
+def run(pipe, path, vars, outdir, log, saved=None, rerun=None, abort=stopping):
     # with saved, a run folder, jobs reuse its outputs for as long as this run retraces it, so back
     # loops and next branches take the same path; from the first job without one (or rerun) on, all jobs run,
-    # the first one reusing its finished foreach items
+    # the first one reusing its finished foreach items and child runs
     start, total = time.time(), 0
     ctx = {"vars": vars, "jobs": {}}
     jobs = pipe["jobs"]
@@ -363,21 +421,25 @@ def run(pipe, vars, outdir, log, saved=None, rerun=None):
         else:
             saved = None
             try:
-                out, cost = run_job(pipe, job, ctx, log, outdir / "jobs" / file, prior)
-            except (PipelineError, Stopped):
+                if abort.is_set():
+                    raise PipelineError(f"{name}: cancelled")
+                out, cost = run_job(pipe, path, job, ctx, log, outdir / "jobs" / file, prior)
+            except (PipelineError, Stopped) as e:
                 # whatever a job raises once the run is stopping, it was stopped
                 if stopping.is_set():
                     raise Stopped(outdir) from None
+                e.cost += total
                 raise
         ctx["jobs"][name] = out
         write(outdir / "jobs" / file, out)
-        # foreach items, now saved with the job
-        shutil.rmtree(outdir / "jobs" / file, ignore_errors=True)
+        # foreach items, now saved with the job; child runs stay
+        if "prompt" in job:
+            shutil.rmtree(outdir / "jobs" / file, ignore_errors=True)
         total += cost
         stop = job.get("stop")
         if stop and holds(ctx, stop["when"]):
             reason = render(stop.get("reason", ""), ctx) or stop["when"]
-            raise PipelineError(f"{name}: stop: {reason}")
+            raise PipelineError(f"{name}: stop: {reason}", total, reason)
         back = job.get("back")
         if back and backs[name] < back["max"] and holds(ctx, back.get("when")):
             backs[name] += 1
@@ -390,7 +452,7 @@ def run(pipe, vars, outdir, log, saved=None, rerun=None):
             i = names.index(to)
         else:
             i += 1
-    output = render(pipe["output"], ctx) if "output" in pipe else text(out)
+    output = value(pipe["output"], ctx) if "output" in pipe else out
     write(outdir / "output", output)
     log(f"done {time.time() - start:.1f}s ${total:.4f} {outdir}")
-    return output
+    return output, total
