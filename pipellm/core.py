@@ -176,8 +176,11 @@ def check(pipe, path, seen=()):
             errors.append(f"{where}: tools must be a list of tool names")
             tools = []
         runner = job.get("runner") or pipe.get("runner") or RUNNER
+        effort = job.get("effort") or pipe.get("effort")
+        if isinstance(effort, str) and TEMPLATE.search(effort):
+            effort = None  # rendered and checked at run time
         if isinstance(runner, str) and not TEMPLATE.search(runner):
-            errors += [f"{where}: {e}" for e in runner_errors(runner, job.get("effort") or pipe.get("effort"), tools)]
+            errors += [f"{where}: {e}" for e in runner_errors(runner, effort, tools)]
         given = job["vars"] if isinstance(job.get("vars"), dict) else {}
         texts = [job.get(k) for k in ("prompt", "runner", "model", "cwd")] + list(given.values())
         refs = [r for t in texts if isinstance(t, str) for r in TEMPLATE.findall(t)]
@@ -276,7 +279,7 @@ def attempt(pipe, job, ctx, label, log, abort):
     retries, spent, start = job.get("retries", RETRIES), 0, time.time()
     try:
         runner = render(job.get("runner") or pipe.get("runner") or RUNNER, ctx)
-        effort = job.get("effort") or pipe.get("effort") or ""
+        effort = render(job.get("effort") or pipe.get("effort") or "", ctx)
         tools = job.get("tools", [])
         if errors := runner_errors(runner, effort, tools):
             raise PipelineError("; ".join(errors))
