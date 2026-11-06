@@ -58,7 +58,11 @@ def start(args):
     pipe = core.load(args.file)
     if errors := core.check(pipe, args.file):
         raise core.PipelineError("\n".join(f"{args.file}: {e}" for e in errors))
-    core.sequential = args.sequential
+    parallel = 1 if args.sequential else args.parallel_limit
+    if parallel is not None and parallel < 1:
+        raise core.PipelineError("--parallel-limit must be at least 1")
+    if parallel:
+        core.limit(parallel)
     claude.ignore_usage = args.ignore_usage
     given = dict(parse_var(v) for v in args.var)
     saved = Path(args.resume) if args.resume else None
@@ -109,7 +113,8 @@ def main():
     p.add_argument("file")
     p.add_argument("--var", action="append", default=[], metavar="KEY=VALUE", help="set a variable, @path reads a file")
     p.add_argument("--vars-file", help="yaml list of variable sets, runs the pipeline once per set")
-    p.add_argument("--sequential", action="store_true", help="run foreach items one at a time")
+    p.add_argument("--parallel-limit", type=int, metavar="N", help="run at most N agents at once")
+    p.add_argument("--sequential", action="store_true", help="run foreach items one at a time, same as --parallel-limit 1")
     p.add_argument("--resume", metavar="RUNDIR", help="continue a saved run, reusing its finished jobs")
     p.add_argument("--ignore-usage", action="store_true", help="start claude agents even near the usage limits")
     p.add_argument("--from", dest="from_job", metavar="JOB", help="with --resume, run again from this job, saving to a new run folder")

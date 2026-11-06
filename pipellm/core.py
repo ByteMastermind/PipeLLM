@@ -57,8 +57,14 @@ class PipelineError(Exception):
 
 # running foreach jobs, for stop() to end
 aborts = set()
-# foreach items one at a time
-sequential = False
+# agents running at once, None for no limit
+parallel = None
+slots = contextlib.nullcontext()
+
+
+def limit(n):
+    global parallel, slots
+    parallel, slots = n, threading.Semaphore(n)
 
 
 def stop():
@@ -293,7 +299,8 @@ def attempt(pipe, job, ctx, label, log, abort):
         )
         for n in range(retries + 1):
             try:
-                out, cost = RUNNERS[runner].run(*args, lambda m: log(f"{label}: {short(m)}"))
+                with slots:
+                    out, cost = RUNNERS[runner].run(*args, lambda m: log(f"{label}: {short(m)}"))
                 break
             except RunnerError as e:
                 spent += e.cost
@@ -364,7 +371,8 @@ def run_job(pipe, path, job, ctx, log, folder, saved):
         return out, cost
 
     outs, cost = [None] * len(items), 0
-    ex = ThreadPoolExecutor(1 if sequential else job.get("concurrency", 4))
+    concurrency = job.get("concurrency", 4)
+    ex = ThreadPoolExecutor(min(concurrency, parallel) if parallel else concurrency)
     futures = {ex.submit(one, i, item): i for i, item in enumerate(items)}
     try:
         for future in as_completed(futures):
