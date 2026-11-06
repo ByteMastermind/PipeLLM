@@ -16,6 +16,7 @@ pipellm start article.yaml --var topic="sqlite WAL mode" > article.md
 pipellm start article.yaml --vars-file topics.yaml
 pipellm start notes.yaml --var doc=@notes.txt
 pipellm start article.yaml --var topic="sqlite WAL mode" --sequential
+pipellm start article.yaml --var topic="sqlite WAL mode" --ignore-usage
 pipellm start article.yaml --resume runs/article-20261027-173208
 pipellm serve
 ```
@@ -27,6 +28,8 @@ Agents run without permission prompts (claude `--permission-mode bypassPermissio
 `--vars-file` is a YAML list of variable sets; the pipeline runs once per set.
 
 `--sequential` runs `foreach` items one at a time, in order, ignoring `concurrency`, also in child pipelines, so many agents don't hit the model or MCP servers at once.
+
+Before starting a claude agent, pipellm checks the Claude subscription usage (what `/usage` in Claude Code shows), at most once a minute. At 97 % of the 5-hour window or 99 % of the weekly window it starts no more agents and prints `waiting until 02:34 5h limit reset`; the agents already running finish, and the run goes on after the reset. The process keeps running while it waits, and ctrl+c stops it as usual. The usage is read with the Claude Code login (`~/.claude/.credentials.json`, or the keychain on macOS); when that fails, for example with an API key, it prints `usage limits not checked` once and runs on. `--ignore-usage` skips the check.
 
 Press ctrl+c to stop a running pipeline. The first press only asks; the second kills the running agents and ends the run. Jobs that finished stay saved in the run folder, and so do the finished items of a `foreach` job, each saved as soon as it is done; only the agents still running lose their progress. pipellm then prints the `--resume` command to continue. A hangup or `kill` stops the run at once, the same way.
 

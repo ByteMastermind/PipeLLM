@@ -6,6 +6,7 @@ import threading
 from pathlib import Path
 
 from . import core, server
+from .runners import claude
 
 
 def parse_var(arg):
@@ -58,6 +59,7 @@ def start(args):
     if errors := core.check(pipe, args.file):
         raise core.PipelineError("\n".join(f"{args.file}: {e}" for e in errors))
     core.sequential = args.sequential
+    claude.ignore_usage = args.ignore_usage
     given = dict(parse_var(v) for v in args.var)
     saved = Path(args.resume) if args.resume else None
     if args.from_job and not saved:
@@ -109,6 +111,7 @@ def main():
     p.add_argument("--vars-file", help="yaml list of variable sets, runs the pipeline once per set")
     p.add_argument("--sequential", action="store_true", help="run foreach items one at a time")
     p.add_argument("--resume", metavar="RUNDIR", help="continue a saved run, reusing its finished jobs")
+    p.add_argument("--ignore-usage", action="store_true", help="start claude agents even near the usage limits")
     p.add_argument("--from", dest="from_job", metavar="JOB", help="with --resume, run again from this job, saving to a new run folder")
     p = sub.add_parser("check", help="validate pipelines")
     p.add_argument("files", nargs="+")
