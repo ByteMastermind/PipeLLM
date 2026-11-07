@@ -188,7 +188,7 @@ def check(pipe, path, seen=()):
         if isinstance(runner, str) and not TEMPLATE.search(runner):
             errors += [f"{where}: {e}" for e in runner_errors(runner, effort, tools)]
         given = job["vars"] if isinstance(job.get("vars"), dict) else {}
-        texts = [job.get(k) for k in ("prompt", "runner", "model", "cwd")] + list(given.values())
+        texts = [job.get(k) for k in ("prompt", "runner", "model", "effort", "cwd")] + list(given.values())
         refs = [r for t in texts if isinstance(t, str) for r in TEMPLATE.findall(t)]
         errors += [f"{where}: unknown reference {r}" for r in unknown_refs(refs, vars, names[:ends[i]], "foreach" in job)]
         if isinstance(job.get("pipeline"), str):
